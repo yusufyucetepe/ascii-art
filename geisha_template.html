@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ASCII Geisha</title>
 <style>
-  html, body { margin: 0; height: 100%; background: #07040a; overflow: hidden; }
+  html, body { margin: 0; height: 100%; background: #ffffff; overflow: hidden; }
   canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; height: 100dvh; display: block; }
 </style>
 </head>
@@ -19,33 +19,31 @@ const ART = __ART__;
 const settings = {
   sway: 1.2,          // how far the top of the art drifts, in characters
   swayPeriod: 14,     // seconds per full sway cycle
-  glow: 0.7,          // glow strength, 0 turns it off
+  glow: 0.3,          // glow strength, 0 turns it off
   breath: 0.25,       // how much the glow pulses, 0 to 1
   breathPeriod: 7,    // seconds per glow pulse
   sheen: 0.16,        // brightness of the light band passing over the art, 0 turns it off
-  motes: 15,          // drifting specks of light, 0 turns them off
-  brightness: 0.35,   // extra brightness for the art, 0 turns it off
+  darkness: 0.9,      // extra darkness for the art, 0 turns it off
   widen: 1.15,        // horizontal stretch of the geisha, 1 is the original shape
-  shadow: [200, 200, 210],  // colour of sparse characters
-  mid: [235, 235, 242],     // colour of medium characters
-  light: [255, 255, 255],   // colour of dense characters
+  sparse: [40, 40, 45],     // colour of sparse characters
+  medium: [15, 15, 18],     // colour of medium characters
+  dense: [0, 0, 0],         // colour of dense characters
   leaves: 28,         // falling pink leaves, 0 turns them off
   leafSize: 0.65,     // leaf size, relative to a grass character
-  leafColours: ["255,145,175", "255,160,190", "255,130,165"],
-  grassOverlap: 0.05, // how far grass reaches up her skirt, as a fraction of her height
+  leafColours: ["255,205,220", "255,215,228", "255,195,213"],
+  grassOverlap: 0.02, // how far grass reaches up her skirt, as a fraction of her height
   horizon: 0.64,      // where the grass starts, 0 is the top of the window and 1 is the bottom
   grassHeight: 0.4,   // tallest blade, as a fraction of the field's height
   grassDensity: 6,    // blades per column of the field
   grassWind: 2,       // how hard the wind bends the grass
-  grassFar: [30, 40, 38],     // grass colour near the horizon
-  grassNear: [50, 78, 44],    // grass colour close to the viewer
-  grassTip: [125, 110, 62],   // colour of blade tips caught by the wind
+  grassFar: [185, 205, 180],  // grass colour near the horizon
+  grassNear: [150, 185, 140], // grass colour close to the viewer
+  grassTip: [195, 190, 130],  // colour of blade tips caught by the wind
 };
 
 const TAU = Math.PI * 2;
-const BG = "#07040a";
+const BG = "#ffffff";
 const FONT_FAMILY = 'Menlo, Consolas, "DejaVu Sans Mono", "Courier New", monospace';
-const MOTE_CHARS = ["·", ".", "'", "`"];
 const lines = ART.split("\n").map((line) => Array.from(line));
 const ROWS = lines.length, COLS = Math.max(...lines.map((line) => line.length));
 const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -83,11 +81,11 @@ const INK = measureInk(new Set(lines.flat()));
 
 function colourFor(ch) {
   const k = INK.get(ch);
-  const c = k < 0.5 ? lerp(settings.shadow, settings.mid, k * 2) : lerp(settings.mid, settings.light, k * 2 - 1);
+  const c = k < 0.5 ? lerp(settings.sparse, settings.medium, k * 2) : lerp(settings.medium, settings.dense, k * 2 - 1);
   return `rgb(${c[0] | 0},${c[1] | 0},${c[2] | 0})`;
 }
 
-let W, H, cw, ch, ox, oy, motes, leaves;
+let W, H, cw, ch, ox, oy, leaves;
 const GRASS_GLYPHS = ["|", "/", "\\", "'", ",", "."];
 const [G_PIPE, G_SLASH, G_BACK, G_TICK, G_COMMA, G_DOT] = GRASS_GLYPHS.keys();
 const GRASS_SHADES = 12;
@@ -115,7 +113,8 @@ function build() {
   artCanvas.width = Math.ceil(COLS * cw);
   artCanvas.height = Math.ceil(ROWS * ch);
   const a = artCanvas.getContext("2d");
-  a.font = `${baseCw / ratio}px ${FONT_FAMILY}`;
+  // Regular-weight characters this small render as grey, and the reference is solid black.
+  a.font = `bold ${baseCw / ratio}px ${FONT_FAMILY}`;
   a.textBaseline = "top";
   a.scale(settings.widen, 1);
   lines.forEach((line, r) => line.forEach((c, col) => {
@@ -133,12 +132,6 @@ function build() {
     land: settings.horizon + Math.random() * (1 - settings.horizon),
   }));
 
-  motes = Array.from({ length: settings.motes }, () => ({
-    x: Math.random(), y: Math.random(), speed: 0.006 + Math.random() * 0.012,
-    drift: 6 + Math.random() * 14, phase: Math.random() * TAU,
-    glyph: MOTE_CHARS[Math.floor(Math.random() * MOTE_CHARS.length)],
-    colour: Math.random() < 0.5 ? "255,190,170" : "255,225,170",
-  }));
 }
 
 function grassColour(k) {
@@ -228,7 +221,7 @@ function drawGrass(grid, covering) {
       const v = grid[r * gCols + c];
       if (!v) continue;
       const glyph = Math.floor((v - 1) / GRASS_SHADES), level = (v - 1) % GRASS_SHADES;
-      // Grass is far dimmer than she is, so without clearing the cell her white characters shine straight through it.
+      // Grass is far paler than she is, so without clearing the cell her dark characters show straight through it.
       if (covering) lctx.clearRect(c * gcw, r * gch, gcw, gch);
       lctx.drawImage(grassAtlas, glyph * gcw, level * gch, gcw, gch, c * gcw, r * gch, gcw, gch);
     }
@@ -255,12 +248,6 @@ function drawLeaves(t) {
     lctx.stroke(LEAF_VEIN);
     lctx.restore();
   }
-}
-
-function isOverArt(px, py) {
-  const row = lines[Math.floor((py - oy) / ch)];
-  const c = row && row[Math.floor((px - ox) / cw)];
-  return Boolean(c) && c !== " ";
 }
 
 function drawArt(t) {
@@ -292,19 +279,6 @@ function drawSheen(t) {
   lctx.restore();
 }
 
-function drawMotes(t) {
-  lctx.font = `${Math.max(16, ch * 2)}px ${FONT_FAMILY}`;
-  lctx.textBaseline = "middle";
-  for (const m of motes) {
-    const py = (((m.y - t * m.speed) % 1 + 1) % 1) * H;
-    const px = m.x * W + Math.sin(t * 0.3 + m.phase) * m.drift * cw;
-    if (isOverArt(px, py)) continue;
-    const alpha = 0.3 + 0.6 * (0.5 + 0.5 * Math.sin(t * 0.8 + m.phase));
-    lctx.fillStyle = `rgba(${m.colour},${alpha})`;
-    lctx.fillText(m.glyph, px, py);
-  }
-}
-
 function drawGlow(t) {
   if (settings.glow <= 0) return;
   let src = layer;
@@ -316,8 +290,8 @@ function drawGlow(t) {
   }
   const pulse = 1 + settings.breath * Math.sin(TAU * t / settings.breathPeriod);
   ctx.save();
-  // "screen" rather than "lighter": additive blending clips dense areas to flat white and erases their detail.
-  ctx.globalCompositeOperation = "screen";
+  // Adding light does nothing on white, so the glow darkens instead, like ink bleeding softly into paper.
+  ctx.globalCompositeOperation = "multiply";
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = "high";
   ctx.globalAlpha = Math.min(1, settings.glow * 0.5 * pulse);
@@ -336,14 +310,13 @@ function render(t) {
   drawArt(t);
   drawSheen(t);
   drawGrass(frontGrid, true);
-  drawMotes(t);
   ctx.globalAlpha = 1;
   ctx.fillStyle = BG;
   ctx.fillRect(0, 0, W, H);
   ctx.globalAlpha = Math.min(1, t / 1.5);
   ctx.drawImage(layer, 0, 0);
-  ctx.globalCompositeOperation = "lighter";
-  ctx.globalAlpha *= settings.brightness;
+  ctx.globalCompositeOperation = "multiply";
+  ctx.globalAlpha *= settings.darkness;
   ctx.drawImage(layer, 0, 0);
   ctx.globalCompositeOperation = "source-over";
   ctx.globalAlpha = 1;

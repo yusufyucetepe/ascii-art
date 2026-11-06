@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).parent
-art_path = Path(sys.argv[1]) if len(sys.argv) > 1 else HERE / "geisha_char.txt"
+art_path = Path(sys.argv[1]) if len(sys.argv) > 1 else HERE / "geisha_traced.txt"
 
 art = art_path.read_text(encoding="utf-8").expandtabs().rstrip()
 if not art.strip():
