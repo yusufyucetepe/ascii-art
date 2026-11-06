@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ASCII Geisha</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #07040a; overflow: hidden; }
+  canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; height: 100dvh; display: block; }
+</style>
+</head>
+<body>
+<canvas id="view" role="img" aria-label="ASCII art portrait of a geisha, gently swaying and glowing"></canvas>
+<script>
+"use strict";
+const ART = __ART__;
+
+// Tweak these.
+const settings = {
+  sway: 1.2,          // how far the top of the art drifts, in characters
+  swayPeriod: 14,     // seconds per full sway cycle
+  glow: 0.7,          // glow strength, 0 turns it off
+  breath: 0.25,       // how much the glow pulses, 0 to 1
+  breathPeriod: 7,    // seconds per glow pulse
+  sheen: 0.16,        // brightness of the light band passing over the art, 0 turns it off
+  motes: 15,          // drifting specks of light, 0 turns them off
+  brightness: 0.35,   // extra brightness for the art, 0 turns it off
+  widen: 1.15,        // horizontal stretch of the geisha, 1 is the original shape
+  shadow: [200, 200, 210],  // colour of sparse characters
+  mid: [235, 235, 242],     // colour of medium characters
+  light: [255, 255, 255],   // colour of dense characters
+  leaves: 28,         // falling pink leaves, 0 turns them off
+  leafSize: 0.65,     // leaf size, relative to a grass character
+  leafColours: ["255,145,175", "255,160,190", "255,130,165"],
+  grassOverlap: 0.05, // how far grass reaches up her skirt, as a fraction of her height
+  horizon: 0.64,      // where the grass starts, 0 is the top of the window and 1 is the bottom
+  grassHeight: 0.4,   // tallest blade, as a fraction of the field's height
+  grassDensity: 6,    // blades per column of the field
+  grassWind: 2,       // how hard the wind bends the grass
+  grassFar: [30, 40, 38],     // grass colour near the horizon
+  grassNear: [50, 78, 44],    // grass colour close to the viewer
+  grassTip: [125, 110, 62],   // colour of blade tips caught by the wind
+};
+
+const TAU = Math.PI * 2;
+const BG = "#07040a";
+const FONT_FAMILY = 'Menlo, Consolas, "DejaVu Sans Mono", "Courier New", monospace';
+const MOTE_CHARS = ["·", ".", "'", "`"];
+const lines = ART.split("\n").map((line) => Array.from(line));
+const ROWS = lines.length, COLS = Math.max(...lines.map((line) => line.length));
+const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+const view = document.getElementById("view"), ctx = view.getContext("2d");
+const artCanvas = document.createElement("canvas"), layer = document.createElement("canvas");
+const lctx = layer.getContext("2d");
+const glowSteps = [2, 4, 8, 16, 32].map((scale) => ({ scale, canvas: document.createElement("canvas") }));
+const NEAR_GLOW = glowSteps[2].canvas, FAR_GLOW = glowSteps[4].canvas;
+
+const lerp = (a, b, k) => a.map((v, i) => v + (b[i] - v) * k);
+const wave = (t, k, phase = 0) => Math.sin(TAU * k * t / (settings.swayPeriod * 2) + phase);
+
+// Colour comes from how much ink each character has, so any character set works.
+function measureInk(chars) {
+  const probe = document.createElement("canvas");
+  probe.width = probe.height = 48;
+  const p = probe.getContext("2d", { willReadFrequently: true });
+  p.font = `32px ${FONT_FAMILY}`;
+  p.textBaseline = "top";
+  const ink = new Map();
+  for (const ch of chars) {
+    p.clearRect(0, 0, 48, 48);
+    p.fillText(ch, 0, 0);
+    const data = p.getImageData(0, 0, 48, 48).data;
+    let sum = 0;
+    for (let i = 3; i < data.length; i += 4) sum += data[i];
+    ink.set(ch, sum);
+  }
+  const max = Math.max(1, ...ink.values());
+  for (const [ch, sum] of ink) ink.set(ch, Math.pow(sum / max, 0.7));
+  return ink;
+}
+const INK = measureInk(new Set(lines.flat()));
+
+function colourFor(ch) {
+  const k = INK.get(ch);
+  const c = k < 0.5 ? lerp(settings.shadow, settings.mid, k * 2) : lerp(settings.mid, settings.light, k * 2 - 1);
+  return `rgb(${c[0] | 0},${c[1] | 0},${c[2] | 0})`;
+}
+
+let W, H, cw, ch, ox, oy, motes, leaves;
+const GRASS_GLYPHS = ["|", "/", "\\", "'", ",", "."];
+const [G_PIPE, G_SLASH, G_BACK, G_TICK, G_COMMA, G_DOT] = GRASS_GLYPHS.keys();
+const GRASS_SHADES = 12;
+const LEAF_SHAPE = new Path2D("M -1 0 Q -0.2 -1.1 1 0 Q -0.2 1.1 -1 0 Z");
+const LEAF_VEIN = new Path2D("M -1.35 0 L 0.8 0");
+const grassAtlas = document.createElement("canvas");
+let gcw, gch, gCols, gRows, cellAspect, field, blades, frontFrom, backGrid, frontGrid, spans;
+
+function build() {
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  W = view.width = layer.width = Math.round(innerWidth * dpr);
+  H = view.height = layer.height = Math.round(innerHeight * dpr);
+  for (const g of glowSteps) { g.canvas.width = Math.ceil(W / g.scale); g.canvas.height = Math.ceil(H / g.scale); }
+
+  const m = document.createElement("canvas").getContext("2d");
+  m.font = `100px ${FONT_FAMILY}`;
+  const ratio = m.measureText("M").width / 100, LINE = 1.15;
+  const baseCw = Math.min(W * 0.94 / (COLS * settings.widen), H * 0.88 * ratio / (ROWS * LINE));
+  cw = baseCw * settings.widen;
+  ch = baseCw * LINE / ratio;
+  ox = Math.round((W - COLS * cw) / 2);
+  const feetY = H * 0.93;
+  oy = Math.round(feetY - ROWS * ch);
+
+  artCanvas.width = Math.ceil(COLS * cw);
+  artCanvas.height = Math.ceil(ROWS * ch);
+  const a = artCanvas.getContext("2d");
+  a.font = `${baseCw / ratio}px ${FONT_FAMILY}`;
+  a.textBaseline = "top";
+  a.scale(settings.widen, 1);
+  lines.forEach((line, r) => line.forEach((c, col) => {
+    if (c === " ") return;
+    a.fillStyle = colourFor(c);
+    a.fillText(c, col * baseCw, r * ch);
+  }));
+
+  buildGrass(dpr, ratio, LINE, feetY);
+
+  leaves = Array.from({ length: settings.leaves }, () => ({
+    x: Math.random(), y: Math.random(), fall: 0.018 + Math.random() * 0.022, blow: 0.012 + Math.random() * 0.02,
+    flutter: 1 + Math.random() * 3, spin: (Math.random() < 0.5 ? -1 : 1) * (0.5 + Math.random()), phase: Math.random() * TAU,
+    colour: settings.leafColours[Math.floor(Math.random() * settings.leafColours.length)],
+    land: settings.horizon + Math.random() * (1 - settings.horizon),
+  }));
+
+  motes = Array.from({ length: settings.motes }, () => ({
+    x: Math.random(), y: Math.random(), speed: 0.006 + Math.random() * 0.012,
+    drift: 6 + Math.random() * 14, phase: Math.random() * TAU,
+    glyph: MOTE_CHARS[Math.floor(Math.random() * MOTE_CHARS.length)],
+    colour: Math.random() < 0.5 ? "255,190,170" : "255,225,170",
+  }));
+}
+
+function grassColour(k) {
+  const c = k < 0.6 ? lerp(settings.grassFar, settings.grassNear, k / 0.6) : lerp(settings.grassNear, settings.grassTip, (k - 0.6) / 0.4);
+  return `rgb(${c[0] | 0},${c[1] | 0},${c[2] | 0})`;
+}
+
+function buildGrass(dpr, ratio, LINE, feetY) {
+  gcw = Math.round(4 * dpr);
+  gch = Math.round(gcw * LINE / ratio);
+  cellAspect = gch / gcw;
+  gCols = Math.ceil(W / gcw);
+  gRows = Math.ceil(H / gch);
+  const horizonRow = Math.floor(gRows * settings.horizon);
+  field = gRows - horizonRow;
+
+  // Thousands of glyphs change every frame, and copying from a pre-drawn sheet is far cheaper than fillText.
+  grassAtlas.width = GRASS_GLYPHS.length * gcw;
+  grassAtlas.height = GRASS_SHADES * gch;
+  const g = grassAtlas.getContext("2d");
+  g.font = `${gcw / ratio}px ${FONT_FAMILY}`;
+  g.textBaseline = "top";
+  for (let s = 0; s < GRASS_SHADES; s++) {
+    g.fillStyle = grassColour(s / (GRASS_SHADES - 1));
+    GRASS_GLYPHS.forEach((glyph, i) => g.fillText(glyph, i * gcw, s * gch));
+  }
+
+  const maxBlade = field * settings.grassHeight;
+  const count = Math.round(gCols * settings.grassDensity);
+  blades = Array.from({ length: count }, () => {
+    const depth = Math.pow(Math.random(), 0.75);
+    return {
+      x: Math.random() * gCols / cellAspect, y: horizonRow + depth * (field + 3), depth,
+      h: (0.8 + maxBlade * depth * depth) * (0.45 + Math.pow(Math.random(), 1.4)),
+      lean0: 0.15 + (Math.random() - 0.5) * 0.35, phase: Math.random() * TAU, tint: Math.random(),
+    };
+  }).sort((p, q) => p.y - q.y);
+  const firstFront = blades.findIndex((b) => b.y * gch > feetY);
+  frontFrom = firstFront < 0 ? blades.length : firstFront;
+  // Front blades are rooted below her feet, so they need extra height to reach the skirt. The random factor keeps the tips uneven.
+  const reachRow = (feetY - ROWS * ch * settings.grassOverlap) / gch;
+  for (const b of blades.slice(frontFrom)) b.h = Math.max(b.h, (b.y - reachRow) * (0.65 + Math.random() * 0.45));
+  backGrid = new Uint8Array(gCols * gRows);
+  frontGrid = new Uint8Array(gCols * gRows);
+
+  spans = lines.map((line) => {
+    const filled = line.map((c) => c !== " ");
+    return [filled.indexOf(true), filled.lastIndexOf(true)];
+  });
+}
+
+function grassWind(x, t) {
+  const period = settings.swayPeriod;
+  const gust = Math.pow(0.5 + 0.5 * Math.sin(TAU * (x / 60 - t / period)), 3);
+  return settings.grassWind * (0.18 + 0.55 * gust + 0.12 * Math.sin(TAU * (x / 17 - 2 * t / period) + 1.3));
+}
+
+function plantBlades(t, from, to, grid) {
+  const period = settings.swayPeriod;
+  grid.fill(0);
+  for (let k = from; k < to; k++) {
+    const b = blades[k];
+    let lean = b.lean0 + grassWind(b.x, t) * (0.6 + 0.6 * b.depth)
+      + (0.35 * Math.sin(TAU * 3 * t / period + b.phase) + 0.15 * Math.sin(TAU * 5 * t / period + b.phase * 1.7)) * (0.5 + b.depth);
+    lean = Math.max(-1.1, Math.min(1.5, lean));
+    const sheen = Math.pow(0.5 + 0.5 * Math.sin(TAU * (b.x / 60 - t / period) - 0.3), 3);
+    const h = b.h, steps = Math.max(1, Math.round(h));
+    for (let s = 0; s <= steps; s++) {
+      const u = s / steps;
+      const r = Math.floor(b.y - h * u), c = Math.floor((b.x + lean * h * 0.55 * u * u) * cellAspect);
+      if (r < 0 || r >= gRows || c < 0 || c >= gCols) continue;
+      const slope = 2.2 * lean * u;
+      const glyph = b.depth < 0.1 ? (u > 0.5 ? G_TICK : G_DOT)
+        : u > 0.9 && steps > 2 ? (slope > 0.5 ? G_TICK : G_COMMA)
+        : slope > 0.6 ? G_SLASH : slope < -0.6 ? G_BACK : G_PIPE;
+      const shade = 0.55 * b.depth * (0.7 + 0.3 * u) + u * u * (0.05 + 0.2 * b.tint) + 0.25 * sheen * u;
+      const level = Math.min(GRASS_SHADES - 1, Math.floor(shade * GRASS_SHADES));
+      // Stored as glyph and shade plus one, so zero can mean an empty cell.
+      grid[r * gCols + c] = 1 + glyph * GRASS_SHADES + level;
+    }
+  }
+}
+
+function drawGrass(grid, covering) {
+  for (let r = 0; r < gRows; r++) {
+    for (let c = 0; c < gCols; c++) {
+      const v = grid[r * gCols + c];
+      if (!v) continue;
+      const glyph = Math.floor((v - 1) / GRASS_SHADES), level = (v - 1) % GRASS_SHADES;
+      // Grass is far dimmer than she is, so without clearing the cell her white characters shine straight through it.
+      if (covering) lctx.clearRect(c * gcw, r * gch, gcw, gch);
+      lctx.drawImage(grassAtlas, glyph * gcw, level * gch, gcw, gch, c * gcw, r * gch, gcw, gch);
+    }
+  }
+}
+
+function drawLeaves(t) {
+  const size = gch * settings.leafSize;
+  for (const leaf of leaves) {
+    const cycle = leaf.land + 0.1;
+    const progress = (leaf.y + t * leaf.fall) % cycle;
+    const py = (progress - 0.1) * H;
+    const px = (((leaf.x + t * leaf.blow) % 1.1 + 1.1) % 1.1 - 0.05) * W + Math.sin(t * 0.9 + leaf.phase) * leaf.flutter * gch;
+    // Leaves fade as they settle into the grass instead of vanishing when they wrap back to the top.
+    const settle = Math.min(1, (cycle - progress) / 0.06);
+    lctx.save();
+    lctx.translate(px, py);
+    lctx.rotate(t * leaf.spin + leaf.phase);
+    lctx.scale(size, size * (0.55 + 0.45 * Math.abs(Math.cos(t * leaf.spin * 1.3 + leaf.phase))));
+    lctx.fillStyle = `rgba(${leaf.colour},${0.95 * settle})`;
+    lctx.fill(LEAF_SHAPE);
+    lctx.strokeStyle = `rgba(120,20,60,${0.8 * settle})`;
+    lctx.lineWidth = 0.09;
+    lctx.stroke(LEAF_VEIN);
+    lctx.restore();
+  }
+}
+
+function isOverArt(px, py) {
+  const row = lines[Math.floor((py - oy) / ch)];
+  const c = row && row[Math.floor((px - ox) / cw)];
+  return Boolean(c) && c !== " ";
+}
+
+function drawArt(t) {
+  const amp = settings.sway * cw;
+  for (let r = 0; r < ROWS; r++) {
+    // Rows nearer the top lag slightly, so motion travels down the figure instead of moving it as one block.
+    const height = 1 - r / ROWS, w = t - 0.4 * height;
+    const shift = amp * Math.pow(height, 1.5) * (0.6 * wave(w, 2) + 0.3 * wave(w, 3, 1) + 0.1 * wave(w, 5, 2));
+    // Cells are fractional, so snap each slice to whole pixels or the row edges blur into faint lines.
+    const y0 = Math.round(r * ch), sliceHeight = Math.round((r + 1) * ch) - y0;
+    // Her characters have gaps, so clear her outline first or the grass and leaves behind her show through.
+    const [first, last] = spans[r];
+    if (first >= 0) lctx.clearRect(ox + shift + first * cw, oy + y0, (last - first + 1) * cw, sliceHeight);
+    lctx.drawImage(artCanvas, 0, y0, artCanvas.width, sliceHeight, ox + shift, oy + y0, artCanvas.width, sliceHeight);
+  }
+}
+
+function drawSheen(t) {
+  if (settings.sheen <= 0) return;
+  const pos = ((t / 18) % 1) * 1.8 - 0.4, band = H * 0.3, y = pos * H;
+  const g = lctx.createLinearGradient(0, y - band, W * 0.25, y + band);
+  g.addColorStop(0, "rgba(255,255,255,0)");
+  g.addColorStop(0.5, `rgba(255,255,255,${settings.sheen})`);
+  g.addColorStop(1, "rgba(255,255,255,0)");
+  lctx.save();
+  lctx.globalCompositeOperation = "source-atop";
+  lctx.fillStyle = g;
+  lctx.fillRect(0, 0, W, H);
+  lctx.restore();
+}
+
+function drawMotes(t) {
+  lctx.font = `${Math.max(16, ch * 2)}px ${FONT_FAMILY}`;
+  lctx.textBaseline = "middle";
+  for (const m of motes) {
+    const py = (((m.y - t * m.speed) % 1 + 1) % 1) * H;
+    const px = m.x * W + Math.sin(t * 0.3 + m.phase) * m.drift * cw;
+    if (isOverArt(px, py)) continue;
+    const alpha = 0.3 + 0.6 * (0.5 + 0.5 * Math.sin(t * 0.8 + m.phase));
+    lctx.fillStyle = `rgba(${m.colour},${alpha})`;
+    lctx.fillText(m.glyph, px, py);
+  }
+}
+
+function drawGlow(t) {
+  if (settings.glow <= 0) return;
+  let src = layer;
+  for (const g of glowSteps) {
+    const gx = g.canvas.getContext("2d");
+    gx.clearRect(0, 0, g.canvas.width, g.canvas.height);
+    gx.drawImage(src, 0, 0, g.canvas.width, g.canvas.height);
+    src = g.canvas;
+  }
+  const pulse = 1 + settings.breath * Math.sin(TAU * t / settings.breathPeriod);
+  ctx.save();
+  // "screen" rather than "lighter": additive blending clips dense areas to flat white and erases their detail.
+  ctx.globalCompositeOperation = "screen";
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.globalAlpha = Math.min(1, settings.glow * 0.5 * pulse);
+  ctx.drawImage(NEAR_GLOW, 0, 0, W, H);
+  ctx.globalAlpha = Math.min(1, settings.glow * 1.5 * pulse);
+  ctx.drawImage(FAR_GLOW, 0, 0, W, H);
+  ctx.restore();
+}
+
+function render(t) {
+  lctx.clearRect(0, 0, W, H);
+  plantBlades(t, 0, frontFrom, backGrid);
+  plantBlades(t, frontFrom, blades.length, frontGrid);
+  drawGrass(backGrid, false);
+  drawLeaves(t);
+  drawArt(t);
+  drawSheen(t);
+  drawGrass(frontGrid, true);
+  drawMotes(t);
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = BG;
+  ctx.fillRect(0, 0, W, H);
+  ctx.globalAlpha = Math.min(1, t / 1.5);
+  ctx.drawImage(layer, 0, 0);
+  ctx.globalCompositeOperation = "lighter";
+  ctx.globalAlpha *= settings.brightness;
+  ctx.drawImage(layer, 0, 0);
+  ctx.globalCompositeOperation = "source-over";
+  ctx.globalAlpha = 1;
+  drawGlow(t);
+}
+
+const FPS = 30;
+const start = performance.now();
+let last = -Infinity;
+function tick(now) {
+  if (now - last >= 1000 / FPS - 2) {
+    last = now;
+    render((now - start) / 1000);
+  }
+  requestAnimationFrame(tick);
+}
+
+const STILL_TIME = 2;
+build();
+if (reduceMotion) render(STILL_TIME);
+else requestAnimationFrame(tick);
+
+let resizeTimer = 0;
+addEventListener("resize", () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    build();
+    if (reduceMotion) render(STILL_TIME);
+  }, 150);
+});
+</script>
+</body>
+</html>
