@@ -1,0 +1,1 @@
+![ASCII art geisha](geisha.png)
