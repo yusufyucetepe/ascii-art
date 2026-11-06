@@ -1,1 +1,1 @@
-![ASCII art geisha](geisha.png)
+![ASCII art geisha](geisha.gif)
